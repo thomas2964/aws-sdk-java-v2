@@ -40,10 +40,14 @@ public class NonBlocking implements CachedSupplier.PrefetchStrategy {
      */
     private final AtomicBoolean currentlyRefreshing = new AtomicBoolean(false);
 
+    private final AtomicBoolean scheduledRefreshesEnabled = new AtomicBoolean(false);
+
     /**
      * Single threaded executor to asynchronous refresh the value.
      */
     private final ScheduledExecutorService executor;
+
+    private volatile CachedSupplier<?> cachedSupplier;
 
     /**
      * Create a non-blocking prefetch strategy that uses the provided value for the name of the background thread that will be
@@ -62,16 +66,15 @@ public class NonBlocking implements CachedSupplier.PrefetchStrategy {
 
     @Override
     public void initializeCachedSupplier(CachedSupplier<?> cachedSupplier) {
-        executor.execute(cachedSupplier::get);
-        scheduleRefresh(cachedSupplier::get);
+        this.cachedSupplier = cachedSupplier;
     }
 
-    private void scheduleRefresh(Runnable valueUpdater) {
+    private void scheduleRefresh() {
         executor.schedule(() -> {
             try {
-                valueUpdater.run();
+                cachedSupplier.get();
             } finally {
-                scheduleRefresh(valueUpdater);
+                scheduleRefresh();
             }
         }, 1, MINUTES);
     }
@@ -84,13 +87,18 @@ public class NonBlocking implements CachedSupplier.PrefetchStrategy {
                 executor.submit(() -> {
                     try {
                         valueUpdater.run();
+
+                        // Enable scheduled refreshes if they haven't been enabled already.
+                        if (scheduledRefreshesEnabled.compareAndSet(false, true)) {
+                            scheduleRefresh();
+                        }
                     } catch (RuntimeException e) {
                         log.warn(() -> "Exception occurred in AWS SDK background task.", e);
                     } finally {
                         currentlyRefreshing.set(false);
                     }
                 });
-            } catch (RuntimeException e) {
+            } catch (Throwable e) {
                 currentlyRefreshing.set(false);
                 throw e;
             }
